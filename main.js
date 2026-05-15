@@ -60638,7 +60638,7 @@ var DEFAULT_SETTINGS = {
   vaultName: "",
   fastDelayMs: 2e3,
   forceDelayMs: 1e4,
-  lastPullTimestamp: 0
+  pollIntervalSec: 2
 };
 
 // node_modules/@filen/sdk/dist/browser/utils.js
@@ -83156,6 +83156,13 @@ var FilenSettingTab = class extends import_obsidian3.PluginSettingTab {
     new import_obsidian3.Setting(containerEl).setName("Force pull (overwrite)").setDesc("Overwrite ALL local files with the versions stored in Filen Drive. This will replace any local changes that haven't been synced yet. Use with caution.").addButton((button) => button.setButtonText("Force pull").setWarning().onClick(() => {
       void this.handleForcePull();
     }));
+    new import_obsidian3.Setting(containerEl).setName("Push vault to Filen").setDesc("Upload all local files that are newer or missing on Filen Drive. Useful to force a full sync without waiting for the debounce timer.").addButton((button) => {
+      this.pushButton = button;
+      this.pushButton.setButtonText("Push now").setCta().onClick(() => {
+        void this.handlePush();
+      });
+      return button;
+    });
     containerEl.createEl("h3", { text: "Sync Engine" });
     new import_obsidian3.Setting(containerEl).setName("Fast sync delay (s)").setDesc("How long to wait after you stop typing before syncing (debounce delay).").addText((text) => text.setPlaceholder("2").setValue(String(this.plugin.settings.fastDelayMs / 1e3)).onChange(async (value) => {
       const parsed = parseFloat(value);
@@ -83169,6 +83176,14 @@ var FilenSettingTab = class extends import_obsidian3.PluginSettingTab {
       const parsed = parseFloat(value);
       if (!isNaN(parsed) && parsed >= 0) {
         this.plugin.settings.forceDelayMs = Math.round(parsed * 1e3);
+        await this.plugin.saveSettings();
+        this.plugin.syncEngine.updateTimers();
+      }
+    }));
+    new import_obsidian3.Setting(containerEl).setName("Poll interval (s)").setDesc("How often to check Filen Drive for remote changes. Set to 0 to disable automatic polling (you will need to pull manually).").addText((text) => text.setPlaceholder("2").setValue(String(this.plugin.settings.pollIntervalSec)).onChange(async (value) => {
+      const parsed = parseFloat(value);
+      if (!isNaN(parsed) && parsed >= 0) {
+        this.plugin.settings.pollIntervalSec = Math.round(parsed);
         await this.plugin.saveSettings();
         this.plugin.syncEngine.updateTimers();
       }
@@ -83224,6 +83239,21 @@ var FilenSettingTab = class extends import_obsidian3.PluginSettingTab {
       return;
     }
     await this.plugin.syncEngine.pullAll(true);
+  }
+  async handlePush() {
+    var _a5, _b, _c, _d;
+    if (!this.plugin.authManager.isAuthenticated) {
+      this.authDesc.setText("Please log in first.");
+      return;
+    }
+    (_a5 = this.pushButton) == null ? void 0 : _a5.setButtonText("Pushing...");
+    (_b = this.pushButton) == null ? void 0 : _b.setDisabled(true);
+    try {
+      await this.plugin.syncEngine.pushAll();
+    } finally {
+      (_c = this.pushButton) == null ? void 0 : _c.setButtonText("Push now");
+      (_d = this.pushButton) == null ? void 0 : _d.setDisabled(false);
+    }
   }
 };
 
@@ -83413,6 +83443,7 @@ var FilenSyncEngine = class {
     this.pending = [];
     this.fastTimer = null;
     this.forceTimer = null;
+    this.pollTimer = null;
     this.processing = false;
     this.pulling = false;
     this.plugin = plugin;
@@ -83427,6 +83458,24 @@ var FilenSyncEngine = class {
     if (this.forceTimer !== null) {
       window.clearTimeout(this.forceTimer);
       this.forceTimer = null;
+    }
+    this.stopPolling();
+    this.startPolling();
+  }
+  /** Start periodic background pulls from Filen Drive. */
+  startPolling() {
+    const intervalSec = this.plugin.settings.pollIntervalSec;
+    if (intervalSec <= 0 || !this.drive.isReady)
+      return;
+    this.pollTimer = window.setInterval(() => {
+      void this.pullAll(false, true);
+    }, intervalSec * 1e3);
+  }
+  /** Stop periodic background pulls. */
+  stopPolling() {
+    if (this.pollTimer !== null) {
+      window.clearInterval(this.pollTimer);
+      this.pollTimer = null;
     }
   }
   /** Queue a vault event and restart the fast debounce timer. */
@@ -83452,6 +83501,7 @@ var FilenSyncEngine = class {
       window.clearTimeout(this.forceTimer);
       this.forceTimer = null;
     }
+    this.stopPolling();
   }
   // ═══════════════════════════════════════
   //  PULL CYCLE (Filen → Obsidian)
@@ -83463,7 +83513,7 @@ var FilenSyncEngine = class {
    * @param force - If true, overwrite all local files with remote versions
    *                regardless of timestamps.
    */
-  async pullAll(force = false) {
+  async pullAll(force = false, silent = false) {
     var _a5, _b;
     if (this.pulling) {
       console.log("[FilenSync] Pull already in progress, skipping.");
@@ -83478,19 +83528,18 @@ var FilenSyncEngine = class {
     this.plugin.statusMessage = force ? "Force pulling\u2026" : "Pulling\u2026";
     let pulled = 0;
     try {
-      new import_obsidian4.Notice("Filen: Pulling vault from cloud\u2026");
       const remoteFiles = await this.drive.listAllFiles();
       console.log(`[FilenSync] Pull: ${remoteFiles.length} remote files found.`);
-      const lastPull = force ? 0 : this.plugin.settings.lastPullTimestamp;
       for (const localPath of remoteFiles) {
         try {
+          const remotePath = this.drive.localToRemote(localPath);
+          const remoteStat = await this.drive.stat(remotePath);
           const localFile = this.plugin.app.vault.getAbstractFileByPath(localPath);
-          if (!force && localFile instanceof import_obsidian4.TFile) {
-            if (localFile.stat.mtime > lastPull) {
+          if (!force && localFile instanceof import_obsidian4.TFile && remoteStat) {
+            if (localFile.stat.mtime >= remoteStat.mtime) {
               continue;
             }
           }
-          const remotePath = this.drive.localToRemote(localPath);
           const buffer = await this.drive.downloadFile(remotePath);
           await this.writeVaultFile(localPath, buffer);
           pulled++;
@@ -83499,22 +83548,76 @@ var FilenSyncEngine = class {
           console.error(`[FilenSync] Failed to pull ${localPath}:`, err);
         }
       }
-      this.plugin.settings.lastPullTimestamp = Date.now();
-      await this.plugin.saveSettings();
-      if (pulled > 0) {
-        new import_obsidian4.Notice(`Filen: Pulled ${pulled} file${pulled !== 1 ? "s" : ""}`);
-      } else {
-        new import_obsidian4.Notice("Filen: Already up to date");
+      if (!silent) {
+        if (pulled > 0) {
+          new import_obsidian4.Notice(`Filen: Pulled ${pulled} file${pulled !== 1 ? "s" : ""}`);
+        } else {
+          new import_obsidian4.Notice("Filen: Already up to date");
+        }
+      } else if (pulled > 0) {
+        console.log(`[FilenSync] Background pull: ${pulled} file${pulled !== 1 ? "s" : ""} updated.`);
       }
     } catch (err) {
       console.error("[FilenSync] Pull cycle failed:", err);
-      new import_obsidian4.Notice(`Filen pull error: ${err.message || "unknown"}`);
+      if (!silent) {
+        new import_obsidian4.Notice(`Filen pull error: ${err.message || "unknown"}`);
+      }
     } finally {
       (_b = this.plugin.vaultListener) == null ? void 0 : _b.resume();
       this.pulling = false;
       this.plugin.statusMessage = "";
     }
     return pulled;
+  }
+  /**
+   * Manually push every file in the vault that doesn't exist on Filen Drive
+   * or is newer than its remote counterpart.
+   * Does NOT pause the listener — this is a one-shot upload pass.
+   */
+  async pushAll() {
+    if (!this.drive.isReady) {
+      console.log("[FilenSync] Not authenticated, skipping push.");
+      return 0;
+    }
+    this.plugin.statusMessage = "Pushing\u2026";
+    let pushed = 0;
+    try {
+      new import_obsidian4.Notice("Filen: Pushing vault to cloud\u2026");
+      const localFiles = this.plugin.app.vault.getFiles();
+      const remoteFiles = await this.drive.listAllFiles();
+      const remoteSet = new Set(remoteFiles);
+      for (const file of localFiles) {
+        try {
+          const remoteExists = remoteSet.has(file.path);
+          if (!remoteExists) {
+            await this.drive.uploadFile(file.path);
+            pushed++;
+            console.log(`[FilenSync] Push (new): ${file.path}`);
+          } else {
+            const remotePath = this.drive.localToRemote(file.path);
+            const remoteStat = await this.drive.stat(remotePath);
+            if (remoteStat && file.stat.mtime > remoteStat.mtime) {
+              await this.drive.uploadFile(file.path);
+              pushed++;
+              console.log(`[FilenSync] Push (updated): ${file.path}`);
+            }
+          }
+        } catch (err) {
+          console.error(`[FilenSync] Push failed for ${file.path}:`, err);
+        }
+      }
+      if (pushed > 0) {
+        new import_obsidian4.Notice(`Filen: Pushed ${pushed} file${pushed !== 1 ? "s" : ""}`);
+      } else {
+        new import_obsidian4.Notice("Filen: Everything is already synced");
+      }
+    } catch (err) {
+      console.error("[FilenSync] Push all failed:", err);
+      new import_obsidian4.Notice(`Filen push error: ${err.message || "unknown"}`);
+    } finally {
+      this.plugin.statusMessage = "";
+    }
+    return pushed;
   }
   // ═══════════════════════════════════════
   //  PUSH (Obsidian → Filen)
@@ -83670,11 +83773,15 @@ var FilenSyncEngine = class {
         await this.plugin.app.vault.createFolder(dir);
       }
     }
+    const arrayBuffer = buffer.buffer.slice(
+      buffer.byteOffset,
+      buffer.byteOffset + buffer.byteLength
+    );
     const existing = this.plugin.app.vault.getAbstractFileByPath(vaultPath);
     if (existing instanceof import_obsidian4.TFile) {
-      await this.plugin.app.vault.modifyBinary(existing, buffer);
+      await this.plugin.app.vault.modifyBinary(existing, arrayBuffer);
     } else {
-      await this.plugin.app.vault.createBinary(vaultPath, buffer);
+      await this.plugin.app.vault.createBinary(vaultPath, arrayBuffer);
     }
   }
 };
@@ -83796,6 +83903,7 @@ var FilenSyncPlugin = class extends import_obsidian6.Plugin {
       console.log("[FilenSync] Session restored from saved credentials.");
       setTimeout(() => {
         void this.syncEngine.pullAll(false);
+        this.syncEngine.startPolling();
       }, 3e3);
     }
   }

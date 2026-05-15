@@ -53,9 +53,10 @@ export default class FilenSyncPlugin extends Plugin {
 
 		if (restored) {
 			console.log('[FilenSync] Session restored from saved credentials.');
-			// Pull files from Filen on startup (not forced — only newer remote files)
+			// Initial pull + start background polling
 			setTimeout(() => {
 				void this.syncEngine.pullAll(false);
+				this.syncEngine.startPolling();
 			}, 3000);
 		}
 	}

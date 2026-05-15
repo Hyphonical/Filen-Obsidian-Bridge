@@ -1,61 +1,119 @@
 # Filen Bridge for Obsidian
 
-Use [Filen](https://filen.io/) as encrypted, zero-knowledge cloud storage for your Obsidian notes with cross-device sync. 
+Use [Filen](https://filen.io/) as encrypted, zero-knowledge cloud sync for your **entire Obsidian vault** — notes, canvas files, images, PDFs, plugins, themes, and settings.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Version](https://img.shields.io/badge/version-0.1.0-green.svg)
 
-> **Note:** This plugin currently only supports Obsidian Desktop.
+> **Note:** This plugin currently requires Obsidian Desktop. Mobile support is planned for the future.
+
+---
 
 ## Features
 
-- **Zero-Knowledge Encryption:** Everything synced is encrypted using Filen's client-side SDK. Only you control the keys.
-- **Full File Tracking:** Automatically synchronizes markdown notes, canvas files, and all attachments to your Filen account. Anything inside your Obsidian vault is seamlessly backed up.
-- **Event-Driven Sync:** Operates silently in the background, debouncing keystrokes and synchronizing notes quickly via incremental push.
-- **Conflict Avoidance:** Retains local metadata mapping so newer conflicting versions don't overwrite your active edits during simultaneous changes.
+- **Full Vault Sync** — Every file in your vault is synced: `.md` notes, `.canvas` files, images, PDFs, your `.obsidian` config folder (plugins, themes, settings), and any other attachments.
+- **Folder Structure Preserved** — Make a folder with two notes on one device, pull on another, and the exact same folder structure is restored.
+- **Zero-Knowledge Encryption** — All files are encrypted client-side using the Filen SDK before they ever leave your machine. Only you hold the keys.
+- **Vault Isolation** — Each vault gets its own isolated folder on Filen Drive (named after the vault), so multiple vaults never collide.
+- **Event-Driven Sync** — Watches for file changes in the background, debounces rapid edits, and pushes automatically when you stop typing.
+- **Periodic Pulling** — Checks Filen Drive every N seconds for remote changes (configurable, default 2s). Remote changes appear automatically.
+- **Latest-Wins Conflict Strategy** — When a file exists both locally and remotely, the version with the newest modification time wins (same as Dropbox/Syncthing).
+- **Push / Pull Controls** — Manually push any unsynced local files or pull the latest from Filen with one click.
+
+---
 
 ## Prerequisites
 
-- Obsidian Desktop (version 1.0.0 or later)
+- Obsidian Desktop (v1.0.0 or later)
 - A [Filen.io](https://filen.io/) account
+
+---
 
 ## Installation
 
-As this is an early beta, the plugin is installed manually or via BRAT. Proper community store integration may come later.
+### Manual
+1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/Hyphonical/filen-obsidian-bridge/releases).
+2. In your vault, create `.obsidian/plugins/filen-bridge/` and place the files there.
+3. Restart Obsidian, go to **Settings → Community plugins**, and enable **Filen Bridge**.
 
-### Manual Installation
-1. Go to the [Releases](https://github.com/Hyphonical/filen-obsidian-bridge/releases) page.
-2. Download the `main.js`, `manifest.json`, and `styles.css` files from the latest release.
-3. In your Obsidian vault folder, navigate to `.obsidian/plugins/` and create a folder named `filen-bridge`.
-4. Place the downloaded files into that folder.
-5. In Obsidian, go to **Settings > Community plugins**, refresh the plugin list, and enable **Filen Bridge**.
+### Via BRAT
+1. Install the [BRAT](https://github.com/TfTHacker/obsidian42-brat) plugin.
+2. Add the repository: `Hyphonical/filen-obsidian-bridge`
+3. Enable **Filen Bridge** in Community Plugins.
 
-### Using Obsidian42 - BRAT
-1. Ensure the BRAT community plugin is installed in Obsidian.
-2. Tell BRAT to add the repository: `Hyphonical/filen-obsidian-bridge`
-3. Turn on the plugin in your Community Plugins settings.
+---
 
 ## Setup & Usage
 
-1. Go to **Settings > Option > Filen Bridge** in Obsidian.
-2. Click **Login** and authenticate using your Filen account details. Your encrypted keys are kept locally in the vault session.
-3. Once logged in, the vault will begin communicating with your Filen account (using the `/.obsidian` sync namespace).
-4. The plugin will track changes locally and push them incrementally right after you stop typing.
-5. **UI Toolbar / Status:** You will notice status updates directly in the Obsidian lower-left corner indicating exactly what is being pushed to the cloud.
+1. Open **Settings → Filen Bridge**.
+2. Click **Login** and enter your Filen credentials (email + password, and 2FA code if enabled).
+3. Your vault name is auto-detected as the sync folder. You can change it in settings if different devices use different local folder names.
+4. Once connected, the plugin automatically syncs changes. The status bar shows what's happening.
 
-## Synchronisation Details
-*  **Notes (`.md`)** are synchronized using the specialized Filen Notes SDK infrastructure for pure text eventual-consistency updates.
-* **Canvas, PDFs, Images, and Other Metadata** are automatically dumped out into an invisible synchronization folder inside the Filen virtual file-system space, maintaining structure but handling heavier data natively.
+### Manual actions
+| Button | What it does |
+|--------|-------------|
+| **Pull now** | Downloads any files from Filen Drive that are newer than your local copies. |
+| **Force pull** | Overwrites ALL local files with the Filen versions — use with caution. |
+| **Push now** | Uploads every local file that doesn't exist on Filen or is newer than the remote copy. |
+
+---
+
+## How Syncing Works
+
+The plugin mirrors your vault folder tree directly onto Filen Drive under `.obsidian/{vault-name}/`. Every file type is treated identically — no special Notes API, no UUID mappings, no metadata files.
+
+```
+Filen Drive
+└── .obsidian/
+    └── MyVault/          ← your vault name
+        ├── daily/
+        │   └── note.md
+        ├── projects/
+        │   └── idea.canvas
+        ├── attachments/
+        │   └── photo.png
+        └── .obsidian/    ← your Obsidian config
+            ├── app.json
+            ├── plugins/
+            └── themes/
+```
+
+- **CREATE/MODIFY** → uploaded to Filen Drive.
+- **RENAME** → moved on Filen Drive (including entire folders).
+- **DELETE** → removed from Filen Drive.
+- **PULL** → any remote files newer than your local ones are downloaded.
+
+Filen Drive handles file versioning natively, so you get history "for free" just by re-uploading.
+
+---
+
+## Cross-Device Setup
+
+To sync the same vault across two computers:
+
+1. Install the plugin on both devices.
+2. On the first device, log in and let the initial sync complete.
+3. On the second device, log in and click **Pull now** under Sync Actions.
+4. Make sure both devices use the same **Sync folder name** in settings. By default this is auto-detected from the vault folder name — if your vault is named `MyVault` on both, it just works.
+
+---
 
 ## Building from Source
 
 ```bash
-bun install
-bun run build
+npm install
+npm run build
 ```
 
+---
+
 ## Contributing
-Pull requests are welcome! If you're adapting feature fixes, please open an issue first to discuss what you want to change. Ensure you read up on standard `@filen/sdk` quirks via browser/desktop overlap limits.
+
+Pull requests are welcome! Please open an issue first to discuss what you'd like to change.
+
+---
 
 ## License
+
 MIT License. See [LICENSE](LICENSE) for details.

@@ -12,8 +12,9 @@ export interface PluginSettings {
 	fastDelayMs: number;
 	/** Maximum delay in milliseconds before forcing a sync, regardless of typing. */
 	forceDelayMs: number;
-	/** Timestamp of the last successful pull from Filen. */
-	lastPullTimestamp: number;
+	/** Interval in seconds for periodic background pulls from Filen Drive.
+	 *  Set to 0 to disable automatic polling. */
+	pollIntervalSec: number;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -21,5 +22,5 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	vaultName: '',
 	fastDelayMs: 2000,
 	forceDelayMs: 10000,
-	lastPullTimestamp: 0,
+	pollIntervalSec: 2,
 };

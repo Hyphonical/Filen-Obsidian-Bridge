@@ -7,6 +7,7 @@ export class FilenSettingTab extends PluginSettingTab {
 	private authButton: ButtonComponent;
 	private authDesc: HTMLElement;
 	private pullButton: ButtonComponent;
+	private pushButton: ButtonComponent;
 
 	constructor(app: App, plugin: FilenSyncPlugin) {
 		super(app, plugin);
@@ -82,6 +83,20 @@ export class FilenSettingTab extends PluginSettingTab {
 					void this.handleForcePull();
 				}));
 
+		new Setting(containerEl)
+			.setName('Push vault to Filen')
+			.setDesc('Upload all local files that are newer or missing on Filen Drive. Useful to force a full sync without waiting for the debounce timer.')
+			.addButton(button => {
+				this.pushButton = button;
+				this.pushButton
+					.setButtonText('Push now')
+					.setCta()
+					.onClick(() => {
+						void this.handlePush();
+					});
+				return button;
+			});
+
 		// ── Sync Engine ──
 		containerEl.createEl('h3', { text: 'Sync Engine' });
 
@@ -110,6 +125,21 @@ export class FilenSettingTab extends PluginSettingTab {
 					const parsed = parseFloat(value);
 					if (!isNaN(parsed) && parsed >= 0) {
 						this.plugin.settings.forceDelayMs = Math.round(parsed * 1000);
+						await this.plugin.saveSettings();
+						this.plugin.syncEngine.updateTimers();
+					}
+				}));
+
+		new Setting(containerEl)
+			.setName('Poll interval (s)')
+			.setDesc('How often to check Filen Drive for remote changes. Set to 0 to disable automatic polling (you will need to pull manually).')
+			.addText(text => text
+				.setPlaceholder('2')
+				.setValue(String(this.plugin.settings.pollIntervalSec))
+				.onChange(async (value) => {
+					const parsed = parseFloat(value);
+					if (!isNaN(parsed) && parsed >= 0) {
+						this.plugin.settings.pollIntervalSec = Math.round(parsed);
 						await this.plugin.saveSettings();
 						this.plugin.syncEngine.updateTimers();
 					}
@@ -174,5 +204,20 @@ export class FilenSettingTab extends PluginSettingTab {
 			return;
 		}
 		await this.plugin.syncEngine.pullAll(true);
+	}
+
+	private async handlePush(): Promise<void> {
+		if (!this.plugin.authManager.isAuthenticated) {
+			this.authDesc.setText('Please log in first.');
+			return;
+		}
+		this.pushButton?.setButtonText('Pushing...');
+		this.pushButton?.setDisabled(true);
+		try {
+			await this.plugin.syncEngine.pushAll();
+		} finally {
+			this.pushButton?.setButtonText('Push now');
+			this.pushButton?.setDisabled(false);
+		}
 	}
 }
