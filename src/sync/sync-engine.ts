@@ -2,6 +2,7 @@ import { Notice, TFile } from 'obsidian';
 import * as path from 'path';
 import type FilenSyncPlugin from '../main';
 import { FilenDriveClient } from './filen-drive';
+import { isIgnored } from '../utils/ignore';
 
 type SyncOpType = 'CREATE' | 'MODIFY' | 'RENAME' | 'DELETE';
 
@@ -131,6 +132,10 @@ export class FilenSyncEngine {
 			console.log(`[FilenSync] Pull: ${remoteFiles.length} remote files found.`);
 
 			for (const localPath of remoteFiles) {
+				if (isIgnored(localPath, this.plugin.settings.ignorePatterns)) {
+					continue;
+				}
+
 				try {
 					const remotePath = this.drive.localToRemote(localPath);
 					const remoteStat = await this.drive.stat(remotePath);
@@ -205,6 +210,10 @@ export class FilenSyncEngine {
 			const remoteSet = new Set(remoteFiles);
 
 			for (const file of localFiles) {
+				if (isIgnored(file.path, this.plugin.settings.ignorePatterns)) {
+					continue;
+				}
+
 				try {
 					const remoteExists = remoteSet.has(file.path);
 					if (!remoteExists) {

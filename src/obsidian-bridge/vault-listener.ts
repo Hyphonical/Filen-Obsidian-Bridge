@@ -1,6 +1,7 @@
 import { TAbstractFile, TFile } from 'obsidian';
 import type FilenSyncPlugin from '../main';
 import { FilenSyncEngine } from '../sync/sync-engine';
+import { isIgnored } from '../utils/ignore';
 
 /**
  * Subscribes to Obsidian vault events and translates them into sync operations.
@@ -90,6 +91,7 @@ export class VaultListener {
 	/** Whether a file should be synced. True for markdown notes and all other files (saved to Filen FS). */
 	private shouldTrack(file: TAbstractFile): boolean {
 		if (!(file instanceof TFile)) return false;
+		if (isIgnored(file.path, this.plugin.settings.ignorePatterns)) return false;
 		return true; // We now track everything
 	}
 

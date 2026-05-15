@@ -144,6 +144,24 @@ export class FilenSettingTab extends PluginSettingTab {
 						this.plugin.syncEngine.updateTimers();
 					}
 				}));
+
+		// ── Ignore Patterns ──
+		containerEl.createEl('h3', { text: 'Ignore Patterns' });
+
+		new Setting(containerEl)
+			.setName('Files to ignore')
+			.setDesc('Newline-separated list of paths to exclude from syncing. Supports basic wildcards (e.g., "node_modules/*", ".env", "*.tmp").')
+			.addTextArea(text => {
+				text.inputEl.style.minHeight = '100px';
+				text.inputEl.style.minWidth = '300px';
+				text
+					.setPlaceholder('node_modules/*\n.env\n*.tmp')
+					.setValue(this.plugin.settings.ignorePatterns)
+					.onChange(async (value) => {
+						this.plugin.settings.ignorePatterns = value;
+						await this.plugin.saveSettings();
+					});
+			});
 	}
 
 	// ── Button logic ──

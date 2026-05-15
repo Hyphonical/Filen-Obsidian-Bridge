@@ -60638,7 +60638,8 @@ var DEFAULT_SETTINGS = {
   vaultName: "",
   fastDelayMs: 2e3,
   forceDelayMs: 1e4,
-  pollIntervalSec: 2
+  pollIntervalSec: 2,
+  ignorePatterns: ""
 };
 
 // node_modules/@filen/sdk/dist/browser/utils.js
@@ -83188,6 +83189,15 @@ var FilenSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.syncEngine.updateTimers();
       }
     }));
+    containerEl.createEl("h3", { text: "Ignore Patterns" });
+    new import_obsidian3.Setting(containerEl).setName("Files to ignore").setDesc('Newline-separated list of paths to exclude from syncing. Supports basic wildcards (e.g., "node_modules/*", ".env", "*.tmp").').addTextArea((text) => {
+      text.inputEl.style.minHeight = "100px";
+      text.inputEl.style.minWidth = "300px";
+      text.setPlaceholder("node_modules/*\n.env\n*.tmp").setValue(this.plugin.settings.ignorePatterns).onChange(async (value) => {
+        this.plugin.settings.ignorePatterns = value;
+        await this.plugin.saveSettings();
+      });
+    });
   }
   // ── Button logic ──
   refreshAuthButton() {
@@ -83437,6 +83447,48 @@ var FilenDriveClient = class {
   }
 };
 
+// src/utils/ignore.ts
+function isIgnored(filePath, ignorePatternsStr) {
+  if (!ignorePatternsStr)
+    return false;
+  const patterns = ignorePatternsStr.split("\n").map((p) => p.trim()).filter((p) => p.length > 0 && !p.startsWith("#"));
+  for (const pattern of patterns) {
+    if (matchesPattern(filePath, pattern)) {
+      return true;
+    }
+  }
+  return false;
+}
+function matchesPattern(filePath, pattern) {
+  if (!pattern.includes("*")) {
+    if (pattern.endsWith("/")) {
+      if (filePath.startsWith(pattern) || filePath.includes("/" + pattern))
+        return true;
+    } else {
+      if (filePath === pattern || filePath.includes("/" + pattern))
+        return true;
+    }
+  }
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  let regexStr = "^" + escaped.replace(/\\\*\\\*/g, ".*").replace(/\\\*/g, "[^/]*");
+  if (!pattern.startsWith("/")) {
+    regexStr = ".*?(^|/)" + escaped.replace(/\\\*\\\*/g, ".*").replace(/\\\*/g, "[^/]*");
+  } else {
+    regexStr = "^" + escaped.slice(2).replace(/\\\*\\\*/g, ".*").replace(/\\\*/g, "[^/]*");
+  }
+  if (!pattern.endsWith("*") && !pattern.endsWith("/")) {
+    regexStr += "$";
+  } else if (pattern.endsWith("/")) {
+    regexStr += ".*";
+  }
+  try {
+    const regex = new RegExp(regexStr);
+    return regex.test(filePath);
+  } catch (e) {
+    return false;
+  }
+}
+
 // src/sync/sync-engine.ts
 var FilenSyncEngine = class {
   constructor(plugin) {
@@ -83531,6 +83583,9 @@ var FilenSyncEngine = class {
       const remoteFiles = await this.drive.listAllFiles();
       console.log(`[FilenSync] Pull: ${remoteFiles.length} remote files found.`);
       for (const localPath of remoteFiles) {
+        if (isIgnored(localPath, this.plugin.settings.ignorePatterns)) {
+          continue;
+        }
         try {
           const remotePath = this.drive.localToRemote(localPath);
           const remoteStat = await this.drive.stat(remotePath);
@@ -83587,6 +83642,9 @@ var FilenSyncEngine = class {
       const remoteFiles = await this.drive.listAllFiles();
       const remoteSet = new Set(remoteFiles);
       for (const file of localFiles) {
+        if (isIgnored(file.path, this.plugin.settings.ignorePatterns)) {
+          continue;
+        }
         try {
           const remoteExists = remoteSet.has(file.path);
           if (!remoteExists) {
@@ -83857,6 +83915,8 @@ var VaultListener = class {
   /** Whether a file should be synced. True for markdown notes and all other files (saved to Filen FS). */
   shouldTrack(file) {
     if (!(file instanceof import_obsidian5.TFile))
+      return false;
+    if (isIgnored(file.path, this.plugin.settings.ignorePatterns))
       return false;
     return true;
   }

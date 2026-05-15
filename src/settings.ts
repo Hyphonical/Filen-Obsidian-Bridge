@@ -15,6 +15,8 @@ export interface PluginSettings {
 	/** Interval in seconds for periodic background pulls from Filen Drive.
 	 *  Set to 0 to disable automatic polling. */
 	pollIntervalSec: number;
+	/** Newline-separated list of wildcard patterns to ignore (e.g., node_modules\/*). */
+	ignorePatterns: string;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -23,4 +25,5 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	fastDelayMs: 2000,
 	forceDelayMs: 10000,
 	pollIntervalSec: 2,
+	ignorePatterns: '',
 };
