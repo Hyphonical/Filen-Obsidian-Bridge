@@ -26,6 +26,12 @@ export default class FilenSyncPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
+		// Auto-detect vault name on first load (can be changed in settings)
+		if (!this.settings.vaultName) {
+			this.settings.vaultName = this.app.vault.getName();
+			await this.saveSettings();
+		}
+
 		this.authManager = new FilenAuthManager(this);
 		const restored = await this.authManager.initializeFromSavedSession();
 
@@ -47,7 +53,7 @@ export default class FilenSyncPlugin extends Plugin {
 
 		if (restored) {
 			console.log('[FilenSync] Session restored from saved credentials.');
-			// Pull notes from Filen on startup (not forced — only newer remote notes)
+			// Pull files from Filen on startup (not forced — only newer remote files)
 			setTimeout(() => {
 				void this.syncEngine.pullAll(false);
 			}, 3000);

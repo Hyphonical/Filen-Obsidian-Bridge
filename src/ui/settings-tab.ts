@@ -19,6 +19,18 @@ export class FilenSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('h2', { text: 'Filen Sync' });
 
+		// ── Vault Name ──
+		new Setting(containerEl)
+			.setName('Sync folder name')
+			.setDesc('This vault is isolated on Filen Drive under this name. Change it only if you want to sync a vault across devices with different local folder names.')
+			.addText(text => text
+				.setPlaceholder('auto-detected')
+				.setValue(this.plugin.settings.vaultName)
+				.onChange(async (value) => {
+					this.plugin.settings.vaultName = value.trim() || this.app.vault.getName();
+					await this.plugin.saveSettings();
+				}));
+
 		// ── Authentication ──
 		const authSetting = new Setting(containerEl)
 			.setName('Authentication')
@@ -47,8 +59,8 @@ export class FilenSettingTab extends PluginSettingTab {
 		containerEl.createEl('h3', { text: 'Sync Actions' });
 
 		new Setting(containerEl)
-			.setName('Pull notes from Filen')
-			.setDesc('Download all notes and attachments from your Filen account that are newer than your local copies. Use this when setting up a new device or restoring your vault.')
+			.setName('Pull vault from Filen')
+			.setDesc('Download all files and folders from your Filen Drive that are newer than your local copies. Use this when setting up a new device or restoring your vault.')
 			.addButton(button => {
 				this.pullButton = button;
 				this.pullButton
@@ -62,7 +74,7 @@ export class FilenSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Force pull (overwrite)')
-			.setDesc('Overwrite ALL local notes and attachments with the versions stored in Filen. This will replace any local changes that haven\'t been synced yet. Use with caution.')
+			.setDesc('Overwrite ALL local files with the versions stored in Filen Drive. This will replace any local changes that haven\'t been synced yet. Use with caution.')
 			.addButton(button => button
 				.setButtonText('Force pull')
 				.setWarning()

@@ -1,9 +1,7 @@
 import { Notice, TFile } from 'obsidian';
 import * as path from 'path';
-import * as fs from 'fs';
 import type FilenSyncPlugin from '../main';
-import { FilenCloudClient } from './filen-notes';
-import { NoteIndex } from './note-index';
+import { FilenDriveClient } from './filen-drive';
 
 type SyncOpType = 'CREATE' | 'MODIFY' | 'RENAME' | 'DELETE';
 
@@ -13,25 +11,20 @@ interface SyncOperation {
 	newPath?: string;
 }
 
-/** Metadata pulled from a remote note (for comparison during pull cycles). */
-interface RemoteNoteMeta {
-	uuid: string;
-	title: string;
-	editedTimestamp: number;
-	trash: boolean;
-}
-
 /**
- * Two-tier sync engine:
- * - Fast debounce (2s idle) for responsiveness
- * - Hard ceiling (10s max) so we always save eventually
- * - Handles both markdown notes (via Notes API) and binary attachments (via FS API)
- * - Pull cycle downloads remote notes and attachments on startup + manual trigger
+ * Uniform file-sync engine.
+ *
+ * Every file — .md notes, .canvas, images, PDFs, .obsidian config — is
+ * treated identically.  The remote folder tree on Filen Drive mirrors the
+ * local vault tree.  No UUID tracking, no Notes API.
+ *
+ * Timer model:
+ *  • Fast debounce (fastDelayMs): reset on every new edit.
+ *  • Hard ceiling (forceDelayMs): flush no matter what.
  */
 export class FilenSyncEngine {
 	private plugin: FilenSyncPlugin;
-	private cloud: FilenCloudClient;
-	private index: NoteIndex;
+	private drive: FilenDriveClient;
 
 	private pending: SyncOperation[] = [];
 	private fastTimer: number | null = null;
@@ -41,8 +34,7 @@ export class FilenSyncEngine {
 
 	constructor(plugin: FilenSyncPlugin) {
 		this.plugin = plugin;
-		this.cloud = new FilenCloudClient(plugin);
-		this.index = new NoteIndex(plugin);
+		this.drive = new FilenDriveClient(plugin);
 	}
 
 	/** Apply updated timer settings on the fly. */
@@ -59,7 +51,7 @@ export class FilenSyncEngine {
 
 	/** Queue a vault event and restart the fast debounce timer. */
 	queue(op: SyncOperation): void {
-		if (!this.cloud.isReady) return;
+		if (!this.drive.isReady) return;
 
 		this.pending.push(op);
 		this.resetFastTimer();
@@ -84,123 +76,69 @@ export class FilenSyncEngine {
 		}
 	}
 
-	// ────────────────────────────────
+	// ═══════════════════════════════════════
 	//  PULL CYCLE (Filen → Obsidian)
-	// ────────────────────────────────
+	// ═══════════════════════════════════════
 
 	/**
-	 * Pull all notes and attachments from Filen and write them to the vault.
-	 * Pauses the VaultListener during the pull to avoid feedback loops.
+	 * Pull all files from Filen Drive and write them to the local vault.
+	 * Pauses the VaultListener during the pull to avoid re-upload loops.
+	 *
 	 * @param force - If true, overwrite all local files with remote versions
-	 *                regardless of edit timestamps.
+	 *                regardless of timestamps.
 	 */
-	async pullAll(force = false): Promise<{ notes: number; attachments: number }> {
+	async pullAll(force = false): Promise<number> {
 		if (this.pulling) {
 			console.log('[FilenSync] Pull already in progress, skipping.');
-			return { notes: 0, attachments: 0 };
+			return 0;
 		}
-		if (!this.cloud.isReady) {
+		if (!this.drive.isReady) {
 			console.log('[FilenSync] Not authenticated, skipping pull.');
-			return { notes: 0, attachments: 0 };
+			return 0;
 		}
 
 		this.pulling = true;
-		// Pause local listener to avoid re-uploading files we're about to download
 		this.plugin.vaultListener?.pause();
 		this.plugin.statusMessage = force ? 'Force pulling…' : 'Pulling…';
 
-		let notesPulled = 0;
-		let attachmentsPulled = 0;
+		let pulled = 0;
 
 		try {
-			new Notice('Filen: Pulling notes from cloud...');
+			new Notice('Filen: Pulling vault from cloud…');
 
-			// 1. Pull the cloud-backed note index
-			const remoteIndex = await this.cloud.pullNoteIndex();
-			if (remoteIndex) {
-				// Merge remote index with local
-				for (const [vaultPath, uuid] of Object.entries(remoteIndex)) {
-					if (!this.index.getByPath(vaultPath)) {
-						this.index.set(vaultPath, uuid);
-					}
-				}
-			}
+			const remoteFiles = await this.drive.listAllFiles();
+			console.log(`[FilenSync] Pull: ${remoteFiles.length} remote files found.`);
 
-			// 2. Fetch all remote notes, compare timestamps, download updated ones
-			const allNotes = await this.cloud.listAllNotes();
-			console.log(`[FilenSync] Pull: ${allNotes.length} remote notes found.`);
-			this.plugin.statusMessage = `Pulling ${allNotes.length} notes…`;
+			const lastPull = force ? 0 : this.plugin.settings.lastPullTimestamp;
 
-			for (const note of allNotes) {
-				if (note.trash) continue;
-
-				const localPath = this.index.getByUUID(note.uuid);
-				const lastPull = force ? 0 : this.plugin.settings.lastPullTimestamp;
-
-				// Skip if we have a local file that's newer than the remote note
-				if (!force && localPath && note.editedTimestamp <= lastPull) {
-					continue;
-				}
-
-				// Determine the local path for this note
-				const targetPath = localPath || this.inferPath(note.title);
-
-				if (!force && localPath) {
-					// Check if local file is newer
-					const localFile = this.plugin.app.vault.getAbstractFileByPath(localPath);
-					if (localFile instanceof TFile && localFile.stat.mtime > note.editedTimestamp) {
-						continue; // Local is newer, don't overwrite
-					}
-				}
-
+			for (const localPath of remoteFiles) {
 				try {
-					const content = await this.cloud.getNoteContent(note.uuid);
-					await this.writeVaultFile(targetPath, content.content);
-					this.index.set(targetPath, note.uuid);
-					notesPulled++;
-					console.log(`[FilenSync] Pulled note: ${targetPath}`);
-				} catch (err) {
-					console.error(`[FilenSync] Failed to pull note ${note.uuid}:`, err);
-				}
-			}
-
-			// 3. Pull attachments from Filen Drive
-			const vaultRoot = this.cloud.vaultRootPath;
-			try {
-				await this.cloud.ensureVaultRoot();
-				const fsFiles = await this.plugin.authManager.sdk!.fs().readdir({ path: vaultRoot, recursive: true });
-
-				for (const remotePath of fsFiles) {
-					// Skip the note-index metadata file itself
-					if (remotePath === 'note-index.json') continue;
-
-					// Convert remote path to local vault path
-					const localRelPath = path.posix.relative(vaultRoot, remotePath);
-					const localFile = this.plugin.app.vault.getAbstractFileByPath(localRelPath);
+					const localFile = this.plugin.app.vault.getAbstractFileByPath(localPath);
 
 					if (!force && localFile instanceof TFile) {
-						continue; // Already exists locally
+						// Skip if local file is newer than last pull
+						if (localFile.stat.mtime > lastPull) {
+							continue;
+						}
 					}
 
-					try {
-						const buffer = await this.cloud.downloadAttachmentBuffer(remotePath);
-						await this.writeVaultBinary(localRelPath, buffer);
-						attachmentsPulled++;
-						console.log(`[FilenSync] Pulled attachment: ${localRelPath}`);
-					} catch (err) {
-						console.error(`[FilenSync] Failed to pull attachment ${remotePath}:`, err);
-					}
+					const remotePath = this.drive.localToRemote(localPath);
+					const buffer = await this.drive.downloadFile(remotePath);
+
+					await this.writeVaultFile(localPath, buffer);
+					pulled++;
+					console.log(`[FilenSync] Pulled: ${localPath}`);
+				} catch (err) {
+					console.error(`[FilenSync] Failed to pull ${localPath}:`, err);
 				}
-			} catch (err) {
-				console.warn('[FilenSync] FS pull skipped (vault root may not exist yet):', err);
 			}
 
 			// Update last pull timestamp
 			this.plugin.settings.lastPullTimestamp = Date.now();
 			await this.plugin.saveSettings();
 
-			if (notesPulled > 0 || attachmentsPulled > 0) {
-				new Notice(`Filen: Pulled ${notesPulled} notes, ${attachmentsPulled} attachments`);
+			if (pulled > 0) {
+				new Notice(`Filen: Pulled ${pulled} file${pulled !== 1 ? 's' : ''}`);
 			} else {
 				new Notice('Filen: Already up to date');
 			}
@@ -208,24 +146,17 @@ export class FilenSyncEngine {
 			console.error('[FilenSync] Pull cycle failed:', err);
 			new Notice(`Filen pull error: ${err.message || 'unknown'}`);
 		} finally {
-			// Push the merged index back to Filen Drive for cross-device sync
-			try {
-				await this.cloud.pushNoteIndex(this.plugin.settings.noteIndex);
-			} catch (err) {
-				console.warn('[FilenSync] Failed to push note index:', err);
-			}
-
 			this.plugin.vaultListener?.resume();
 			this.pulling = false;
 			this.plugin.statusMessage = '';
 		}
 
-		return { notes: notesPulled, attachments: attachmentsPulled };
+		return pulled;
 	}
 
-	// ────────────────────────────────
+	// ═══════════════════════════════════════
 	//  PUSH (Obsidian → Filen)
-	// ────────────────────────────────
+	// ═══════════════════════════════════════
 
 	private resetFastTimer(): void {
 		if (this.fastTimer !== null) {
@@ -240,6 +171,8 @@ export class FilenSyncEngine {
 	/** Process every queued operation sequentially. */
 	private async flush(): Promise<void> {
 		if (this.processing || this.pending.length === 0) return;
+
+		// Clear both timers
 		if (this.forceTimer !== null) {
 			window.clearTimeout(this.forceTimer);
 			this.forceTimer = null;
@@ -270,6 +203,7 @@ export class FilenSyncEngine {
 		}
 	}
 
+	/** Remove redundant MODIFY operations for the same path. */
 	private deduplicate(ops: SyncOperation[]): SyncOperation[] {
 		const result: SyncOperation[] = [];
 		const seenModify = new Set<string>();
@@ -289,161 +223,107 @@ export class FilenSyncEngine {
 		return result;
 	}
 
+	/** Route a single operation to the appropriate handler. */
 	private async processOperation(op: SyncOperation): Promise<void> {
 		const file = this.plugin.app.vault.getAbstractFileByPath(op.path);
+
 		if (!file && op.type !== 'RENAME' && op.type !== 'DELETE') {
 			console.warn(`[FilenSync] File gone before sync: ${op.path}`);
 			return;
 		}
 
-		// Route to notes or attachments based on extension
-		if (op.path.endsWith('.md')) {
-			await this.processNoteOperation(op, file as TFile | null);
-		} else {
-			await this.processAttachmentOperation(op, file as TFile | null);
-		}
-	}
-
-	// ── Note operations (Notes API) ──
-
-	private async processNoteOperation(op: SyncOperation, file: TFile | null): Promise<void> {
 		switch (op.type) {
 			case 'CREATE':
-				if (file) await this.handleNoteCreate(file);
+				if (file instanceof TFile) await this.handleCreate(file);
 				break;
 			case 'MODIFY':
-				if (file) await this.handleNoteModify(file);
+				if (file instanceof TFile) await this.handleModify(file);
 				break;
 			case 'RENAME':
-				await this.handleNoteRename(op.path, op.newPath!);
+				await this.handleRename(op.path, op.newPath!);
 				break;
 			case 'DELETE':
-				await this.handleNoteDelete(op.path);
+				await this.handleDelete(op.path);
 				break;
 		}
 	}
 
-	private async handleNoteCreate(file: TFile): Promise<void> {
-		if (this.index.getByPath(file.path)) return;
-		const title = file.basename;
-		const content = await this.plugin.app.vault.cachedRead(file);
-		const uuid = await this.cloud.createNote(title, content, 'md');
-		this.index.set(file.path, uuid);
-		// Also push index to cloud
-		await this.cloud.pushNoteIndex(this.plugin.settings.noteIndex);
-		console.log(`[FilenSync] Created remote note ${uuid} for ${file.path}`);
-	}
-
-	private async handleNoteModify(file: TFile): Promise<void> {
-		const uuid = this.index.getByPath(file.path);
-		if (!uuid) {
-			await this.handleNoteCreate(file);
-			return;
-		}
-		const content = await this.plugin.app.vault.cachedRead(file);
-		await this.cloud.updateNoteContent(uuid, content, 'md');
-		console.log(`[FilenSync] Updated remote note ${uuid}`);
-	}
-
-	private async handleNoteRename(oldPath: string, newPath: string): Promise<void> {
-		this.index.rename(oldPath, newPath);
-		const uuid = this.index.getByPath(newPath);
-		if (uuid) {
-			const newName = newPath.split('/').pop()?.replace(/\.md$/, '') || newPath;
-			await this.cloud.updateNoteTitle(uuid, newName);
-		}
-		await this.cloud.pushNoteIndex(this.plugin.settings.noteIndex);
-	}
-
-	private async handleNoteDelete(localPath: string): Promise<void> {
-		const uuid = this.index.getByPath(localPath);
-		if (uuid) {
-			await this.cloud.trashNote(uuid);
-			this.index.remove(localPath);
-			await this.cloud.pushNoteIndex(this.plugin.settings.noteIndex);
-			console.log(`[FilenSync] Trashed remote note ${uuid}`);
+	private async handleCreate(file: TFile): Promise<void> {
+		try {
+			await this.drive.uploadFile(file.path);
+			console.log(`[FilenSync] Uploaded: ${file.path}`);
+		} catch (err) {
+			console.error(`[FilenSync] Upload failed ${file.path}:`, err);
 		}
 	}
 
-	// ── Attachment operations (FS API) ──
-
-	private async processAttachmentOperation(op: SyncOperation, file: TFile | null): Promise<void> {
-		switch (op.type) {
-			case 'CREATE':
-				if (file) await this.handleAttachmentCreate(file);
-				break;
-			case 'MODIFY':
-				if (file) await this.handleAttachmentModify(file);
-				break;
-			case 'RENAME':
-				await this.handleAttachmentRename(op.path, op.newPath!);
-				break;
-			case 'DELETE':
-				await this.handleAttachmentDelete(op.path);
-				break;
+	private async handleModify(file: TFile): Promise<void> {
+		try {
+			await this.drive.uploadFile(file.path);
+			console.log(`[FilenSync] Updated: ${file.path}`);
+		} catch (err) {
+			console.error(`[FilenSync] Modify-upload failed ${file.path}:`, err);
 		}
 	}
 
-	private async handleAttachmentCreate(file: TFile): Promise<void> {
-		if (this.plugin.settings.attachmentIndex[file.path]) return;
+	private async handleRename(oldPath: string, newPath: string): Promise<void> {
+		try {
+			const oldRemote = this.drive.localToRemote(oldPath);
+			const newRemote = this.drive.localToRemote(newPath);
 
-		const { uuid } = await this.cloud.uploadAttachment(file.path);
-		this.plugin.settings.attachmentIndex[file.path] = uuid;
-		await this.plugin.saveSettings();
-		console.log(`[FilenSync] Uploaded attachment ${file.path} -> ${uuid}`);
-	}
+			// Is this a file (has extension) or a directory?
+			const isFile = oldPath.includes('.');
+			if (isFile) {
+				await this.drive.renameFile(oldRemote, newRemote);
+			} else {
+				// Directory rename — move all children
+				const allFiles = await this.drive.listAllFiles();
+				const children = allFiles.filter(
+					f => f === oldPath || f.startsWith(oldPath + '/')
+				);
 
-	private async handleAttachmentModify(file: TFile): Promise<void> {
-		// Re-upload the entire file (attachments are binary, no partial updates)
-		const uuid = this.plugin.settings.attachmentIndex[file.path];
-		if (uuid) {
-			const remotePath = this.attachmentRemotePath(file.path);
-			await this.cloud.deleteAttachment(remotePath);
-		}
-		delete this.plugin.settings.attachmentIndex[file.path];
-		await this.handleAttachmentCreate(file);
-	}
+				for (const child of children) {
+					const childNewPath = child.replace(oldPath, newPath);
+					const childOldRemote = this.drive.localToRemote(child);
+					const childNewRemote = this.drive.localToRemote(childNewPath);
+					await this.drive.renameFile(childOldRemote, childNewRemote);
+				}
+			}
 
-	private async handleAttachmentRename(oldPath: string, newPath: string): Promise<void> {
-		const uuid = this.plugin.settings.attachmentIndex[oldPath];
-		if (uuid) {
-			delete this.plugin.settings.attachmentIndex[oldPath];
-			this.plugin.settings.attachmentIndex[newPath] = uuid;
-			await this.plugin.saveSettings();
-
-			// Rename on Filen Drive
-			const oldRemotePath = this.attachmentRemotePath(oldPath);
-			const newRemotePath = this.attachmentRemotePath(newPath);
-			const dir = path.posix.dirname(newRemotePath);
-			await this.plugin.authManager.sdk!.fs().mkdir({ path: dir });
-			await this.plugin.authManager.sdk!.fs().rename({ from: oldRemotePath, to: newRemotePath });
+			console.log(`[FilenSync] Renamed: ${oldPath} → ${newPath}`);
+		} catch (err) {
+			console.error(`[FilenSync] Rename failed ${oldPath} → ${newPath}:`, err);
 		}
 	}
 
-	private async handleAttachmentDelete(localPath: string): Promise<void> {
-		const remotePath = this.attachmentRemotePath(localPath);
-		await this.cloud.deleteAttachment(remotePath);
-		delete this.plugin.settings.attachmentIndex[localPath];
-		await this.plugin.saveSettings();
-		console.log(`[FilenSync] Deleted attachment ${localPath}`);
+	private async handleDelete(localPath: string): Promise<void> {
+		try {
+			const remotePath = this.drive.localToRemote(localPath);
+
+			// Is it a file (has extension) or a directory?
+			const isFile = localPath.includes('.');
+			if (isFile) {
+				await this.drive.deleteFile(remotePath);
+			} else {
+				await this.drive.deleteDirectory(remotePath);
+			}
+
+			console.log(`[FilenSync] Deleted: ${localPath}`);
+		} catch (err) {
+			console.error(`[FilenSync] Delete failed ${localPath}:`, err);
+		}
 	}
 
-	private attachmentRemotePath(localPath: string): string {
-		return path.posix.join(this.cloud.vaultRootPath, localPath);
-	}
-
-	// ────────────────────────────────
+	// ═══════════════════════════════════════
 	//  HELPERS
-	// ────────────────────────────────
+	// ═══════════════════════════════════════
 
-	/** Infer a local vault path from a note title. */
-	private inferPath(title: string): string {
-		const safeName = title.replace(/[/\\?%*:|"<>]/g, '-');
-		return `${safeName}.md`;
-	}
-
-	/** Write text content to a vault file, creating intermediate folders as needed. */
-	private async writeVaultFile(vaultPath: string, content: string): Promise<void> {
+	/**
+	 * Write a binary buffer into the vault, creating intermediate folders.
+	 * Uses modifyBinary / createBinary so ALL file types (text, images, etc.)
+	 * are handled uniformly.
+	 */
+	private async writeVaultFile(vaultPath: string, buffer: Buffer): Promise<void> {
 		const dir = path.posix.dirname(vaultPath);
 		if (dir && dir !== '.') {
 			const dirExists = this.plugin.app.vault.getAbstractFileByPath(dir);
@@ -454,19 +334,9 @@ export class FilenSyncEngine {
 
 		const existing = this.plugin.app.vault.getAbstractFileByPath(vaultPath);
 		if (existing instanceof TFile) {
-			await this.plugin.app.vault.modify(existing, content);
+			await this.plugin.app.vault.modifyBinary(existing, buffer);
 		} else {
-			await this.plugin.app.vault.create(vaultPath, content);
+			await this.plugin.app.vault.createBinary(vaultPath, buffer);
 		}
-	}
-
-	/** Write binary content to a vault file. */
-	private async writeVaultBinary(vaultPath: string, buffer: Buffer): Promise<void> {
-		const vaultRoot = (this.plugin.app.vault.adapter as any).basePath as string;
-		const absolutePath = path.join(vaultRoot, vaultPath);
-
-		const dir = path.dirname(absolutePath);
-		fs.mkdirSync(dir, { recursive: true });
-		fs.writeFileSync(absolutePath, buffer);
 	}
 }
