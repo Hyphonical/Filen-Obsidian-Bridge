@@ -1,0 +1,13 @@
+.filen-login-modal input[type='email'],
+.filen-login-modal input[type='password'],
+.filen-login-modal input[type='text'] {
+	width: 100%;
+}
+
+.filen-login-modal .setting-item-info {
+	flex: 1 1 auto;
+}
+
+.filen-login-modal .setting-item-control {
+	flex: 2 1 auto;
+}

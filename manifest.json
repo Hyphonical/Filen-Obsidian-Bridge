@@ -1,0 +1,10 @@
+{
+	"id": "filen-bridge",
+	"name": "Filen Bridge",
+	"version": "0.1.0",
+	"minAppVersion": "1.0.0",
+	"description": "Use Filen as encrypted zero-knowledge cloud storage for your Obsidian notes with cross-device sync.",
+	"author": "Hyphonical",
+	"authorUrl": "",
+	"isDesktopOnly": true
+}

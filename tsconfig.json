@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "inlineSourceMap": true,
+    "inlineSources": true,
+    "module": "nodenext",
+    "target": "ES6",
+    "allowJs": true,
+    "noImplicitAny": true,
+    "importHelpers": false,
+    "isolatedModules": true,
+    "moduleResolution": "nodenext",
+    "skipLibCheck": true,
+    "strictNullChecks": true,
+    "strictPropertyInitialization": false,
+    "lib": [
+      "DOM",
+      "ES5",
+      "ES6",
+      "ES7"
+    ],
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "**/*.ts"
+  ]
+}
