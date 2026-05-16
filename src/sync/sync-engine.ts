@@ -1,5 +1,4 @@
 import { Notice, TFile } from 'obsidian';
-import * as path from 'path';
 import type FilenSyncPlugin from '../main';
 import { FilenDriveClient } from './filen-drive';
 import { isIgnored } from '../utils/ignore';
@@ -163,6 +162,7 @@ export class FilenSyncEngine {
 					}
 
 					const remoteStat = await this.drive.stat(remotePath);
+					if (remoteStat && remoteStat.type === 'directory') continue;
 
 					const localFile = this.plugin.app.vault.getAbstractFileByPath(localPath);
 
@@ -448,8 +448,14 @@ export class FilenSyncEngine {
 	 * Uses modifyBinary / createBinary so ALL file types (text, images, etc.)
 	 * are handled uniformly.
 	 */
-	private async writeVaultFile(vaultPath: string, buffer: Buffer): Promise<void> {
-		const dir = path.posix.dirname(vaultPath);
+	private dirname(p: string): string {
+		const parts = p.split('/');
+		parts.pop();
+		return parts.length > 0 ? parts.join('/') : '.';
+	}
+
+	private async writeVaultFile(vaultPath: string, content: Uint8Array): Promise<void> {
+		const dir = this.dirname(vaultPath);
 		if (dir && dir !== '.') {
 			const dirExists = this.plugin.app.vault.getAbstractFileByPath(dir);
 			if (!dirExists) {
@@ -457,12 +463,9 @@ export class FilenSyncEngine {
 			}
 		}
 
-		// Obsidian's vault API expects ArrayBuffer, not Node Buffer.
-		// Buffer.buffer can be larger than the Buffer itself (shared backing store),
-		// so we slice the exact range.
-		const arrayBuffer = buffer.buffer.slice(
-			buffer.byteOffset,
-			buffer.byteOffset + buffer.byteLength
+		const arrayBuffer = content.buffer.slice(
+			content.byteOffset,
+			content.byteOffset + content.byteLength
 		) as ArrayBuffer;
 
 		const existing = this.plugin.app.vault.getAbstractFileByPath(vaultPath);

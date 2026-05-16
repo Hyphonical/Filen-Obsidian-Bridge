@@ -1,6 +1,3 @@
-import * as path from 'path';
-import * as os from 'os';
-import * as fs from 'fs';
 import type FilenSyncPlugin from '../main';
 
 /**
@@ -51,7 +48,13 @@ export class FilenDriveClient {
 	 * e.g. "Notes/daily.md" → ".obsidian/MyVault/Notes/daily.md"
 	 */
 	localToRemote(localPath: string): string {
-		return path.posix.join(this.vaultRootPath, localPath);
+		return `${this.vaultRootPath}/${localPath.replace(/^\/+/, '')}`;
+	}
+
+	private dirname(p: string): string {
+		const parts = p.split('/');
+		parts.pop();
+		return parts.length > 0 ? parts.join('/') : '.';
 	}
 
 	/** 
@@ -93,30 +96,34 @@ export class FilenDriveClient {
 		if (!this.sdk) throw new Error('Filen SDK not initialized');
 
 		const remotePath = this.localToRemote(localPath);
-		const remoteDir = path.posix.dirname(remotePath);
+		const remoteDir = this.dirname(remotePath);
 
 		// Ensure remote directory structure exists
 		await this.sdk.fs().mkdir({ path: remoteDir });
 
-		// Read local file from disk
-		const vaultRoot = (this.plugin.app.vault.adapter as any).basePath;
-		const absoluteSource = path.join(vaultRoot, localPath);
-		const buffer = fs.readFileSync(absoluteSource);
+		// Read local file from disk via Obsidian adapter
+		let buffer: ArrayBuffer;
+		try {
+			buffer = await this.plugin.app.vault.adapter.readBinary(localPath);
+		} catch (e: any) {
+			console.error(`[FilenSync] Failed to read local file ${localPath}:`, e);
+			throw e;
+		}
 
 		console.log(`[FilenSync] Uploading: ${localPath} → ${remotePath}`);
 		await this.sdk.fs().writeFile({
 			path: remotePath,
-			content: buffer,
+			content: new Uint8Array(buffer) as unknown as Buffer,
 		});
 	}
 
 	/**
 	 * Download a file from Filen Drive and return its raw buffer.
 	 */
-	async downloadFile(remotePath: string): Promise<Buffer> {
+	async downloadFile(remotePath: string): Promise<Uint8Array> {
 		if (!this.sdk) throw new Error('Filen SDK not initialized');
 		const buffer = await this.sdk.fs().readFile({ path: remotePath });
-		return buffer;
+		return buffer as Uint8Array;
 	}
 
 	/**
@@ -152,7 +159,7 @@ export class FilenDriveClient {
 	async renameFile(oldRemotePath: string, newRemotePath: string): Promise<void> {
 		if (!this.sdk) throw new Error('Filen SDK not initialized');
 
-		const newDir = path.posix.dirname(newRemotePath);
+		const newDir = this.dirname(newRemotePath);
 		await this.sdk.fs().mkdir({ path: newDir });
 
 		try {
@@ -204,11 +211,11 @@ export class FilenDriveClient {
 	/**
 	 * Get file stat (size, mtime, etc.) from Filen Drive.
 	 */
-	async stat(remotePath: string): Promise<{ size: number; mtime: number } | null> {
+	async stat(remotePath: string): Promise<{ size: number; mtime: number; type: 'file' | 'directory' } | null> {
 		if (!this.sdk) return null;
 		try {
-			const s = await this.sdk.fs().stat({ path: remotePath });
-			return { size: s.size, mtime: s.mtimeMs };
+			const s = await this.sdk.fs().stat({ path: remotePath }) as any;
+			return { size: s.size, mtime: s.mtimeMs, type: s.type || (typeof s.isDirectory === 'function' && s.isDirectory() ? 'directory' : 'file') };
 		} catch {
 			return null;
 		}

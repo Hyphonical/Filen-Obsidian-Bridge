@@ -1,6 +1,4 @@
 import { FilenSDK } from '@filen/sdk';
-import * as path from 'path';
-import * as os from 'os';
 import { Notice } from 'obsidian';
 import type FilenSyncPlugin from '../main';
 import { FilenSession } from '../types';
@@ -38,7 +36,6 @@ export class FilenAuthManager {
 			this._sdk = new FilenSDK({
 				metadataCache: true,
 				connectToSocket: true,
-				tmpPath: path.join(os.tmpdir(), 'obsidian-filen-plugin'),
 				masterKeys: session.masterKeys,
 				apiKey: session.apiKey,
 				publicKey: session.publicKey,
@@ -65,7 +62,6 @@ export class FilenAuthManager {
 		const sdk = new FilenSDK({
 			metadataCache: true,
 			connectToSocket: true,
-			tmpPath: path.join(os.tmpdir(), 'obsidian-filen-plugin'),
 		});
 
 		await sdk.login({

@@ -1,5 +1,6 @@
 import esbuild from "esbuild";
 import process from "process";
+import { polyfillNode } from "esbuild-plugin-polyfill-node";
 
 // Node.js built-in modules to exclude from bundling
 const nodeBuiltins = [
@@ -42,13 +43,32 @@ const context = await esbuild.context({
 		"@lezer/common",
 		"@lezer/highlight",
 		"@lezer/lr",
-		...nodeBuiltins],
+	],
 	format: "cjs",
+	platform: "browser",
+	mainFields: ["browser", "module", "main"],
 	target: "es2018",
 	logLevel: "info",
 	sourcemap: prod ? false : "inline",
 	treeShaking: true,
 	outfile: "main.js",
+	alias: {
+		"fs-extra": "./stub.js",
+		"graceful-fs": "./stub.js"
+	},
+	plugins: [
+		polyfillNode({
+			polyfills: {
+				fs: true,
+				crypto: true,
+				os: true,
+				path: true,
+				stream: true,
+				events: true,
+				buffer: true,
+			}
+		}),
+	],
 });
 
 if (prod) {

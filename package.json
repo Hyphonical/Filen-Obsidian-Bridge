@@ -1,6 +1,6 @@
 {
 	"name": "filen-bridge",
-	"version": "0.3.0",
+	"version": "0.4.0",
 	"description": "Use Filen as encrypted zero-knowledge cloud storage for your notes.",
 	"main": "main.js",
 	"scripts": {
@@ -16,6 +16,7 @@
 		"@typescript-eslint/eslint-plugin": "5.29.0",
 		"@typescript-eslint/parser": "5.29.0",
 		"esbuild": "0.25.0",
+		"esbuild-plugin-polyfill-node": "^0.3.0",
 		"obsidian": ">=0.12.12",
 		"tslib": "2.4.0",
 		"typescript": "4.7.4"
