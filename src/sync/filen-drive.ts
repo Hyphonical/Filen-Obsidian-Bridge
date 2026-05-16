@@ -25,6 +25,11 @@ export class FilenDriveClient {
 		return this.plugin.authManager.sdk;
 	}
 
+	/** Public read-only access to the underlying FilenSDK (used by socket registration). */
+	get rawSdk() {
+		return this.sdk;
+	}
+
 	/** Whether we have an authenticated SDK ready. */
 	get isReady(): boolean {
 		return this.sdk !== null;

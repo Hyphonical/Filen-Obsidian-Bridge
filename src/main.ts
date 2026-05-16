@@ -44,19 +44,19 @@ export default class FilenSyncPlugin extends Plugin {
 		this.statusBarItemEl = this.addStatusBarItem();
 		this.statusBarItemEl.classList.add('mod-clickable');
 		this.statusBarItemEl.onClickEvent(() => {
-			// @ts-ignore
+			// @ts-expect-error - Internal Obsidian API for opening settings
 			this.app.setting.open();
-			// @ts-ignore
+			// @ts-expect-error - Internal Obsidian API for opening settings
 			this.app.setting.openTabById(this.manifest.id);
 		});
 		this.refreshStatusBar();
 
 		if (restored) {
 			console.log('[FilenSync] Session restored from saved credentials.');
-			// Initial pull + start background polling
+			// Start socket listeners for real-time sync, then do an initial pull
+			this.syncEngine.start();
 			setTimeout(() => {
 				void this.syncEngine.pullAll(false);
-				this.syncEngine.startPolling();
 			}, 3000);
 		}
 	}
@@ -64,6 +64,12 @@ export default class FilenSyncPlugin extends Plugin {
 	onunload(): void {
 		this.vaultListener?.stop();
 		this.syncEngine?.destroy();
+
+		// Clean up SDK socket to prevent stale connections on hot reload
+		const sdk = this.authManager?.sdk;
+		if (sdk && (sdk as any).socket) {
+			(sdk as any).socket.disconnect();
+		}
 	}
 
 	async loadSettings(): Promise<void> {
@@ -78,13 +84,26 @@ export default class FilenSyncPlugin extends Plugin {
 		if (!this.statusBarItemEl) return;
 
 		const isAuth = this.authManager.isAuthenticated;
-		let text = isAuth ? 'Filen: Connected' : 'Filen: Disconnected';
-		if (this._statusMessage) {
+		const socketOk = this.syncEngine?.socketConnected ?? false;
+
+		let text: string;
+		let title: string;
+
+		if (!isAuth) {
+			text = 'Filen: Disconnected';
+			title = 'Click to log in to Filen';
+		} else if (this._statusMessage) {
 			text = `Filen: ${this._statusMessage}`;
+			title = 'Click to manage Filen Sync settings';
+		} else if (socketOk) {
+			text = 'Filen: ● Live';
+			title = 'Socket connected — real-time sync active. Click for settings.';
+		} else {
+			text = 'Filen: ◌ Socket';
+			title = 'Socket disconnected — changes will sync on next manual pull. Click for settings.';
 		}
+
 		this.statusBarItemEl.setText(text);
-		this.statusBarItemEl.title = isAuth
-			? 'Click to manage Filen Sync settings'
-			: 'Click to log in to Filen';
+		this.statusBarItemEl.title = title;
 	}
 }

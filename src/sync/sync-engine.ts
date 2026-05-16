@@ -29,20 +29,20 @@ export class FilenSyncEngine {
 	private pending: SyncOperation[] = [];
 	private fastTimer: number | null = null;
 	private forceTimer: number | null = null;
-	private pollTimer: number | null = null;
+	private socketDebounce: number | null = null;
 	private processing = false;
 	private pulling = false;
-
-	/**
-	 * Paths deleted locally that haven't been flushed to remote yet.
-	 * pullAll() uses this to DELETE the remote file instead of
-	 * re-downloading it, preventing resurrection on the next poll.
-	 */
-	private recentlyDeleted = new Set<string>();
+	private _socketConnected = false;
+	private lastLocalUpload = 0;
 
 	constructor(plugin: FilenSyncPlugin) {
 		this.plugin = plugin;
 		this.drive = new FilenDriveClient(plugin);
+	}
+
+	/** Whether the Filen WebSocket connection is currently active. */
+	get socketConnected(): boolean {
+		return this._socketConnected;
 	}
 
 	/** Apply updated timer settings on the fly. */
@@ -55,26 +55,26 @@ export class FilenSyncEngine {
 			window.clearTimeout(this.forceTimer);
 			this.forceTimer = null;
 		}
-		// Restart polling with the new interval
-		this.stopPolling();
-		this.startPolling();
 	}
 
-	/** Start periodic background pulls from Filen Drive. */
-	startPolling(): void {
-		const intervalSec = this.plugin.settings.pollIntervalSec;
-		if (intervalSec <= 0 || !this.drive.isReady) return;
-
-		this.pollTimer = window.setInterval(() => {
-			void this.pullAll(false, true);
-		}, intervalSec * 1000);
+	/**
+	 * Start listening to Filen's WebSocket for real-time remote changes.
+	 * Call once after authentication succeeds.
+	 */
+	start(): void {
+		if (!this.drive.isReady) return;
+		this.registerSocketEvents();
+		console.log('[FilenSync] Socket listeners registered.');
 	}
 
-	/** Stop periodic background pulls. */
-	stopPolling(): void {
-		if (this.pollTimer !== null) {
-			window.clearInterval(this.pollTimer);
-			this.pollTimer = null;
+	/**
+	 * Unsubscribe from socket events and teardown. Call from Plugin.onunload().
+	 */
+	stop(): void {
+		this.unregisterSocketEvents();
+		if (this.socketDebounce !== null) {
+			window.clearTimeout(this.socketDebounce);
+			this.socketDebounce = null;
 		}
 	}
 
@@ -83,12 +83,6 @@ export class FilenSyncEngine {
 		if (!this.drive.isReady) return;
 
 		this.pending.push(op);
-
-		// Track deletions so pullAll() can delete remote instead of
-		// re-downloading the file before the flush fires.
-		if (op.type === 'DELETE') {
-			this.recentlyDeleted.add(op.path);
-		}
 
 		this.resetFastTimer();
 
@@ -100,7 +94,7 @@ export class FilenSyncEngine {
 		}
 	}
 
-	/** Tear down timers. Call from Plugin.onunload(). */
+	/** Tear down timers and socket. Call from Plugin.onunload(). */
 	destroy(): void {
 		if (this.fastTimer !== null) {
 			window.clearTimeout(this.fastTimer);
@@ -110,8 +104,128 @@ export class FilenSyncEngine {
 			window.clearTimeout(this.forceTimer);
 			this.forceTimer = null;
 		}
-		this.stopPolling();
-		this.recentlyDeleted.clear();
+		this.stop();
+	}
+
+	// ═══════════════════════════════════════
+	//  SOCKET EVENTS (real-time remote changes)
+	// ═══════════════════════════════════════
+
+	private registerSocketEvents(): void {
+		const sdk = this.drive.rawSdk;
+		if (!sdk) return;
+
+		const socket = (sdk as any).socket;
+		if (!socket) {
+			console.warn('[FilenSync] No socket available — SDK may not have connected yet.');
+			return;
+		}
+
+		// SDK socket may not auto-connect from a restored session; kick it
+		if (!socket.connected && !socket.isConnecting && sdk.config?.apiKey) {
+			socket.connect({ apiKey: sdk.config.apiKey });
+		}
+
+		// Track WebSocket connection state for status bar indicator
+		this._socketConnected = socket.connected === true || (typeof socket.isConnected === 'function' && socket.isConnected());
+		this.plugin.refreshStatusBar();
+
+		socket.on('connected', () => {
+			this._socketConnected = true;
+			this.plugin.refreshStatusBar();
+			console.log('[FilenSync] Socket connected.');
+		});
+
+		socket.on('disconnected', () => {
+			this._socketConnected = false;
+			this.plugin.refreshStatusBar();
+			console.log('[FilenSync] Socket disconnected.');
+		});
+
+		// Poll as a fallback in case the 'connected' event fires before listener registration
+		setInterval(() => {
+			const isConnected = socket.connected === true || (typeof socket.isConnected === 'function' && socket.isConnected());
+			if (isConnected !== this._socketConnected) {
+				this._socketConnected = isConnected;
+				this.plugin.refreshStatusBar();
+			}
+		}, 5000);
+
+		// Listen for remote file changes via SDK's single "socketEvent" event.
+		// The SDK emits: socketEvent = { type: "fileNew" | "fileRename" | "fileRestore" | "fileArchiveRestored" | "fileDeletedPermanent", data }
+		socket.on('socketEvent', this.onRemoteChange);
+
+		// Also handle socket.io-level "chatConversationsNew" etc. as a pass-through for future events
+		// A debounced pull covers all remote mutations regardless of the exact event type.
+	}
+
+	private unregisterSocketEvents(): void {
+		const sdk = this.drive.rawSdk;
+		if (!sdk) return;
+
+		const socket = (sdk as any).socket;
+		if (!socket) return;
+
+		socket.off('socketEvent', this.onRemoteChange);
+	}
+
+	/**
+	 * Called whenever the Filen socket notifies us of a remote change.
+	 * Only triggers a pull for meaningful content-change events.
+	 * Debounced — multiple rapid events (e.g. a bulk upload) will only
+	 * trigger one pull after the dust settles.
+	 */
+	private onRemoteChange = (event: { type: string; data?: any }): void => {
+		// Ignore meta/noise events that don't represent actual file changes
+		if (event.type === 'newEvent' || event.type === 'fileArchived') return;
+
+		// Ignore socket echo from our own recent uploads
+		if (Date.now() - this.lastLocalUpload < this.plugin.settings.socketCooldownMs) return;
+
+		console.log(`[FilenSync] Socket event: ${event.type}`);
+
+		if (this.socketDebounce !== null) {
+			window.clearTimeout(this.socketDebounce);
+		}
+		this.socketDebounce = window.setTimeout(() => {
+			this.socketDebounce = null;
+			void this.pullAll(false, true);
+		}, 1000);
+	};
+
+	/**
+	 * Synchronously drain all queued pending operations before starting
+	 * a pull cycle.  This ensures every local CREATE, MODIFY, RENAME, and
+	 * DELETE is reflected on the remote side *before* we list files, so
+	 * nothing can "resurrect" from a stale remote listing.
+	 */
+	private async drainPending(): Promise<void> {
+		if (this.pending.length > 0 && !this.processing) {
+			// Cancel the force timer so it doesn't double-flush
+			if (this.forceTimer !== null) {
+				window.clearTimeout(this.forceTimer);
+				this.forceTimer = null;
+			}
+			if (this.fastTimer !== null) {
+				window.clearTimeout(this.fastTimer);
+				this.fastTimer = null;
+			}
+
+			this.processing = true;
+			const batch = this.pending.splice(0);
+
+			const deduped = this.deduplicate(batch);
+			for (const op of deduped) {
+				await this.processOperation(op);
+			}
+
+			this.processing = false;
+		}
+		// If another batch arrived while we were draining (unlikely but
+		// possible due to listener events despite being paused), drain again.
+		if (this.pending.length > 0) {
+			await this.drainPending();
+		}
 	}
 
 	// ═══════════════════════════════════════
@@ -137,6 +251,12 @@ export class FilenSyncEngine {
 
 		this.pulling = true;
 		this.plugin.vaultListener?.pause();
+
+		// Drain any pending local operations (CREATE, MODIFY, RENAME, DELETE)
+		// to the remote BEFORE we list files, so we never resurrect a file
+		// that the user just renamed or deleted.
+		await this.drainPending();
+
 		this.plugin.statusMessage = force ? 'Force pulling…' : 'Pulling…';
 
 		let pulled = 0;
@@ -152,14 +272,6 @@ export class FilenSyncEngine {
 
 				try {
 					const remotePath = this.drive.localToRemote(localPath);
-
-					// If this file was deleted locally but the DELETE op hasn't
-					// flushed yet, delete it from remote instead of resurrecting it.
-					if (this.recentlyDeleted.has(localPath)) {
-						await this.drive.deleteFile(remotePath);
-						console.log(`[FilenSync] Pull: deleted remote ${localPath} (pending local delete)`);
-						continue;
-					}
 
 					const remoteStat = await this.drive.stat(remotePath);
 					if (remoteStat && remoteStat.type === 'directory') continue;
@@ -243,6 +355,7 @@ export class FilenSyncEngine {
 					if (!remoteExists) {
 						// New file — upload
 						await this.drive.uploadFile(file.path);
+						this.lastLocalUpload = Date.now();
 						pushed++;
 						console.log(`[FilenSync] Push (new): ${file.path}`);
 					} else {
@@ -251,6 +364,7 @@ export class FilenSyncEngine {
 						const remoteStat = await this.drive.stat(remotePath);
 						if (remoteStat && file.stat.mtime > remoteStat.mtime) {
 							await this.drive.uploadFile(file.path);
+							this.lastLocalUpload = Date.now();
 							pushed++;
 							console.log(`[FilenSync] Push (updated): ${file.path}`);
 						}
@@ -361,7 +475,9 @@ export class FilenSyncEngine {
 				if (file instanceof TFile) await this.handleModify(file);
 				break;
 			case 'RENAME':
-				await this.handleRename(op.path, op.newPath!);
+				if (op.newPath) {
+					await this.handleRename(op.path, op.newPath);
+				}
 				break;
 			case 'DELETE':
 				await this.handleDelete(op.path);
@@ -372,6 +488,7 @@ export class FilenSyncEngine {
 	private async handleCreate(file: TFile): Promise<void> {
 		try {
 			await this.drive.uploadFile(file.path);
+			this.lastLocalUpload = Date.now();
 			console.log(`[FilenSync] Uploaded: ${file.path}`);
 		} catch (err) {
 			console.error(`[FilenSync] Upload failed ${file.path}:`, err);
@@ -381,6 +498,7 @@ export class FilenSyncEngine {
 	private async handleModify(file: TFile): Promise<void> {
 		try {
 			await this.drive.uploadFile(file.path);
+			this.lastLocalUpload = Date.now();
 			console.log(`[FilenSync] Updated: ${file.path}`);
 		} catch (err) {
 			console.error(`[FilenSync] Modify-upload failed ${file.path}:`, err);
@@ -432,10 +550,6 @@ export class FilenSyncEngine {
 			console.log(`[FilenSync] Deleted: ${localPath}`);
 		} catch (err) {
 			console.error(`[FilenSync] Delete failed ${localPath}:`, err);
-		} finally {
-			// Always clean up — if remote delete failed, the next poll
-			// will pull the file back, which is the correct fallback.
-			this.recentlyDeleted.delete(localPath);
 		}
 	}
 

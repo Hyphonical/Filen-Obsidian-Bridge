@@ -16,7 +16,7 @@ Use [Filen](https://filen.io/) as encrypted, zero-knowledge cloud sync for your 
 - **Zero-Knowledge Encryption** — All files are encrypted client-side using the Filen SDK before they ever leave your machine. Only you hold the keys.
 - **Vault Isolation** — Each vault gets its own isolated folder on Filen Drive (named after the vault), so multiple vaults never collide.
 - **Event-Driven Sync** — Watches for file changes in the background, debounces rapid edits, and pushes automatically when you stop typing.
-- **Periodic Pulling** — Checks Filen Drive every N seconds for remote changes (configurable, default 2s). Remote changes appear automatically.
+- **Real-Time Pull** — Uses Filen's WebSocket to receive push notifications for remote changes. Files appear on your device within seconds — no polling needed.
 - **Latest-Wins Conflict Strategy** — When a file exists both locally and remotely, the version with the newest modification time wins (same as Dropbox/Syncthing).
 - **Push / Pull Controls** — Manually push any unsynced local files or pull the latest from Filen with one click.
 
@@ -24,7 +24,7 @@ Use [Filen](https://filen.io/) as encrypted, zero-knowledge cloud sync for your 
 
 ## Prerequisites
 
-- Obsidian Desktop (v1.0.0 or later)
+- Obsidian Desktop (v1.4.0 or later)
 - A [Filen.io](https://filen.io/) account
 
 ---
@@ -32,7 +32,7 @@ Use [Filen](https://filen.io/) as encrypted, zero-knowledge cloud sync for your 
 ## Installation
 
 ### Manual
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/Hyphonical/filen-obsidian-bridge/releases).
+1. Download `main.js`, `manifest.json`, and `styles.css` from the latest release.
 2. In your vault, create `.obsidian/plugins/filen-bridge/` and place the files there.
 3. Restart Obsidian, go to **Settings → Community plugins**, and enable **Filen Bridge**.
 
@@ -59,7 +59,43 @@ Use [Filen](https://filen.io/) as encrypted, zero-knowledge cloud sync for your 
 
 ---
 
-## How Syncing Works
+## Configuration Reference
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Sync folder name** | Auto-detected from vault name | Isolates this vault on Filen Drive. Change only if devices use different local folder names. |
+| **Fast sync delay** | 2s | How long to wait after you stop typing before pushing changes. |
+| **Force sync delay** | 10s | Maximum wait before pushing, even if you're still typing. |
+| **Ignore patterns** | *(empty)* | Newline-separated glob patterns for files/folders to exclude from sync. |
+
+---
+
+## How Syncing Works (in Detail)
+
+The plugin uses a **debounce + force-flush + real-time socket** model:
+
+1. **You edit a file** → A `MODIFY` operation is queued. Each new keystroke resets the **fast sync timer** (default 2s).
+2. **The fast timer expires** (you stopped typing) → All queued operations are **deduplicated** and **flushed** to Filen Drive in one batch.
+3. **Force timer expires** (default 10s) → Flushes regardless of whether you're still typing — ensures changes are never held indefinitely.
+4. **You delete/rename a file** → The operation is immediately queued. Before any pull, the pending queue is **drained** so the old file cannot "resurrect."
+5. **Real-time socket events** → Filen's WebSocket notifies the plugin instantly when files change on another device. The plugin debounces these (1s cooldown) and pulls the latest versions.
+6. **Vault listener is paused during pull cycles** → Prevents feedback loops where a pulled file triggers an upload.
+
+```
+User edits ──→ queue("MODIFY") ──→ fast timer reset
+                                      │
+          ┌───────────────────────────┘
+          ▼
+   fast timer expires (2s idle)
+          │
+          ▼
+    deduplicate queue ──→ flush to Filen Drive
+
+Filen WebSocket:
+    socketEvent.file.new ─────┐
+    socketEvent.file.rename ──┤──→ (1s debounce) ──→ drain pending ──→ pull changes
+    socketEvent.file.delete ──┘
+```
 
 The plugin mirrors your vault folder tree directly onto Filen Drive under `.obsidian/{vault-name}/`. Every file type is treated identically — no special Notes API, no UUID mappings, no metadata files.
 
@@ -96,6 +132,58 @@ To sync the same vault across two computers:
 2. On the first device, log in and let the initial sync complete.
 3. On the second device, log in and click **Pull now** under Sync Actions.
 4. Make sure both devices use the same **Sync folder name** in settings. By default this is auto-detected from the vault folder name — if your vault is named `MyVault` on both, it just works.
+
+---
+
+## Limitations
+
+- **Requires WebSocket connectivity** — Real-time sync depends on Filen's WebSocket staying connected. If your network blocks WebSockets, you can still use manual Push/Pull.
+- **No merge conflict resolution** — If both sides modify the same file before syncing, the version with the **newest modification time wins** (latest-wins strategy). No three-way merge.
+- **No selective sync** — The entire vault is synced as one unit. You can exclude files via ignore patterns, but there's no per-folder one-way sync.
+- **Desktop only** — Mobile support is planned for the future.
+
+---
+
+## Troubleshooting
+
+### "Why did my deleted file come back?"
+
+The plugin **drains all pending local operations before every pull** — this means if you delete or rename a file, your change is synced to Filen Drive *before* any remote changes are downloaded. This prevents resurrection.
+
+If the issue persists:
+- Manually click **Push now** after deleting files to force an immediate upload of the deletion.
+- Check that the file isn't being recreated by another plugin on startup.
+- Verify the WebSocket connection is stable (status bar shows "Connected").
+
+### "Push now" vs "Pull now" — what should I use?
+
+- **Push now**: I've added files on this device and want them on Filen *right now*.
+- **Pull now**: I expect changes from another device and want them locally *right now*.
+- **Force pull**: Overwrite ALL local files with remote versions. Use when you've made accidental local changes you want to discard.
+
+### "I'm not seeing changes from my other device"
+
+Real-time sync uses Filen's WebSocket. If changes aren't appearing:
+- Check the status bar — it should show **Filen: ● Live** when connected. If it shows **Filen: ◌ Socket**, the WebSocket isn't connected.
+- Click **Pull now** to force a manual sync.
+- Verify your network isn't blocking WebSocket connections.
+- Check [Filen's status page](https://status.filen.io/) for service outages.
+
+### "The sync folder name changed unexpectedly"
+
+The sync folder name auto-detects from your vault name. If you rename your vault folder, you may need to update the **Sync folder name** in settings to match. Otherwise, the plugin will create a new folder on Filen Drive (your old data is still there under the old name).
+
+---
+
+## Roadmap
+
+- [x] Real-time sync via Filen WebSocket events (no polling latency)
+- [x] WebSocket connection health indicator in status bar
+- [ ] Conflict resolution UI (side-by-side diff for conflicted files)
+- [ ] Selective folder sync (one-way, exclude)
+- [ ] Sync statistics and activity log
+- [ ] Context menu integration (right-click → sync/exclude)
+- [ ] Mobile support
 
 ---
 

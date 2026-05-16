@@ -1,4 +1,4 @@
-import { PluginSettingTab, App, Setting, ButtonComponent } from 'obsidian';
+import { PluginSettingTab, App, Setting, ButtonComponent, Modal } from 'obsidian';
 import type FilenSyncPlugin from '../main';
 import { FilenLoginModal } from '../auth/login-modal';
 
@@ -56,7 +56,7 @@ export class FilenSettingTab extends PluginSettingTab {
 		this.authDesc.style.color = 'var(--text-muted)';
 		this.refreshAuthDesc();
 
-		// ── Pull / Force Sync ──
+		// ── Sync Actions ──
 		containerEl.createEl('h3', { text: 'Sync Actions' });
 
 		new Setting(containerEl)
@@ -130,21 +130,6 @@ export class FilenSettingTab extends PluginSettingTab {
 					}
 				}));
 
-		new Setting(containerEl)
-			.setName('Poll interval (s)')
-			.setDesc('How often to check Filen Drive for remote changes. Set to 0 to disable automatic polling (you will need to pull manually).')
-			.addText(text => text
-				.setPlaceholder('2')
-				.setValue(String(this.plugin.settings.pollIntervalSec))
-				.onChange(async (value) => {
-					const parsed = parseFloat(value);
-					if (!isNaN(parsed) && parsed >= 0) {
-						this.plugin.settings.pollIntervalSec = Math.round(parsed);
-						await this.plugin.saveSettings();
-						this.plugin.syncEngine.updateTimers();
-					}
-				}));
-
 		// ── Ignore Patterns ──
 		containerEl.createEl('h3', { text: 'Ignore Patterns' });
 
@@ -162,6 +147,28 @@ export class FilenSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 			});
+
+		// ── Developer Settings (collapsible) ──
+		const devDetails = containerEl.createEl('details');
+		const devSummary = devDetails.createEl('summary');
+		devSummary.textContent = 'Developer Settings';
+		devSummary.style.marginTop = '24px';
+		devSummary.style.cursor = 'pointer';
+		devSummary.style.fontWeight = 'var(--bold-weight)';
+
+		new Setting(devDetails)
+			.setName('Socket cooldown (ms)')
+			.setDesc('How long to ignore socket echo events after a local upload, to prevent self-triggered pull loops.')
+			.addText(text => text
+				.setPlaceholder('1000')
+				.setValue(String(this.plugin.settings.socketCooldownMs))
+				.onChange(async (value) => {
+					const parsed = parseInt(value, 10);
+					if (!isNaN(parsed) && parsed >= 0) {
+						this.plugin.settings.socketCooldownMs = parsed;
+						await this.plugin.saveSettings();
+					}
+				}));
 	}
 
 	// ── Button logic ──
@@ -174,9 +181,12 @@ export class FilenSettingTab extends PluginSettingTab {
 
 	private refreshAuthDesc(): void {
 		const isAuth = this.plugin.authManager.isAuthenticated;
+		const socketOk = this.plugin.syncEngine?.socketConnected ?? false;
 		this.authDesc.setText(
 			isAuth
-				? 'Connected to Filen. Your session is persisted in this vault.'
+				? socketOk
+					? 'Connected to Filen. Real-time sync active via WebSocket. Your session is persisted in this vault.'
+					: 'Connected to Filen but WebSocket is not connected. Real-time updates are unavailable — use manual Pull.'
 				: 'Not connected. Click Login to enter your Filen credentials.'
 		);
 	}
@@ -187,7 +197,8 @@ export class FilenSettingTab extends PluginSettingTab {
 			this.refreshAuthButton();
 			this.refreshAuthDesc();
 			this.plugin.refreshStatusBar();
-			// Auto-pull after fresh login
+			// Start socket listeners + initial pull after fresh login
+			this.plugin.syncEngine.start();
 			setTimeout(() => {
 				void this.plugin.syncEngine.pullAll(false);
 			}, 2000);
@@ -221,6 +232,15 @@ export class FilenSettingTab extends PluginSettingTab {
 			this.authDesc.setText('Please log in first.');
 			return;
 		}
+
+		// Confirm destructive action
+		const confirmed = await new Promise<boolean>((resolve) => {
+			const modal = new ConfirmModal(this.app, resolve);
+			modal.open();
+		});
+
+		if (!confirmed) return;
+
 		await this.plugin.syncEngine.pullAll(true);
 	}
 
@@ -237,5 +257,41 @@ export class FilenSettingTab extends PluginSettingTab {
 			this.pushButton?.setButtonText('Push now');
 			this.pushButton?.setDisabled(false);
 		}
+	}
+}
+
+class ConfirmModal extends Modal {
+	private resolve: (value: boolean) => void;
+
+	constructor(app: App, resolve: (value: boolean) => void) {
+		super(app);
+		this.resolve = resolve;
+	}
+
+	onOpen(): void {
+		const { contentEl, titleEl } = this;
+		titleEl.setText('Force Pull?');
+		contentEl.createEl('p', {
+			text: 'This will overwrite ALL local files with the versions from Filen Drive. Any local changes that haven\'t been synced will be lost. Are you sure?',
+		});
+
+		new Setting(contentEl)
+			.addButton(btn => btn
+				.setButtonText('Cancel')
+				.onClick(() => {
+					this.resolve(false);
+					this.close();
+				}))
+			.addButton(btn => btn
+				.setButtonText('Force Pull')
+				.setWarning()
+				.onClick(() => {
+					this.resolve(true);
+					this.close();
+				}));
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
 	}
 }

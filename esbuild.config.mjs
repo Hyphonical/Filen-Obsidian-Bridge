@@ -47,11 +47,15 @@ const context = await esbuild.context({
 	format: "cjs",
 	platform: "browser",
 	mainFields: ["browser", "module", "main"],
-	target: "es2018",
+	target: "es2020",
 	logLevel: "info",
 	sourcemap: prod ? false : "inline",
+	minify: prod,
 	treeShaking: true,
 	outfile: "main.js",
+	define: {
+		"global": "window",
+	},
 	alias: {
 		"fs-extra": "./stub.js",
 		"graceful-fs": "./stub.js"
