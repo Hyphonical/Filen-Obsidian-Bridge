@@ -1,7 +1,7 @@
 {
 	"name": "filen-bridge",
 	"version": "0.3.0",
-	"description": "Use Filen as encrypted zero-knowledge cloud storage for your Obsidian notes.",
+	"description": "Use Filen as encrypted zero-knowledge cloud storage for your notes.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
