@@ -6,5 +6,5 @@
 	"description": "Use Filen as encrypted zero-knowledge cloud storage for your notes.",
 	"author": "Hyphonical",
 	"authorUrl": "https://github.com/Hyphonical",
-	"isDesktopOnly": false,
+	"isDesktopOnly": false
 }
