@@ -34,6 +34,13 @@ export class FilenSyncEngine {
 	private processing = false;
 	private pulling = false;
 
+	/**
+	 * Paths deleted locally that haven't been flushed to remote yet.
+	 * pullAll() uses this to DELETE the remote file instead of
+	 * re-downloading it, preventing resurrection on the next poll.
+	 */
+	private recentlyDeleted = new Set<string>();
+
 	constructor(plugin: FilenSyncPlugin) {
 		this.plugin = plugin;
 		this.drive = new FilenDriveClient(plugin);
@@ -77,6 +84,13 @@ export class FilenSyncEngine {
 		if (!this.drive.isReady) return;
 
 		this.pending.push(op);
+
+		// Track deletions so pullAll() can delete remote instead of
+		// re-downloading the file before the flush fires.
+		if (op.type === 'DELETE') {
+			this.recentlyDeleted.add(op.path);
+		}
+
 		this.resetFastTimer();
 
 		if (this.forceTimer === null) {
@@ -98,6 +112,7 @@ export class FilenSyncEngine {
 			this.forceTimer = null;
 		}
 		this.stopPolling();
+		this.recentlyDeleted.clear();
 	}
 
 	// ═══════════════════════════════════════
@@ -138,6 +153,15 @@ export class FilenSyncEngine {
 
 				try {
 					const remotePath = this.drive.localToRemote(localPath);
+
+					// If this file was deleted locally but the DELETE op hasn't
+					// flushed yet, delete it from remote instead of resurrecting it.
+					if (this.recentlyDeleted.has(localPath)) {
+						await this.drive.deleteFile(remotePath);
+						console.log(`[FilenSync] Pull: deleted remote ${localPath} (pending local delete)`);
+						continue;
+					}
+
 					const remoteStat = await this.drive.stat(remotePath);
 
 					const localFile = this.plugin.app.vault.getAbstractFileByPath(localPath);
@@ -408,6 +432,10 @@ export class FilenSyncEngine {
 			console.log(`[FilenSync] Deleted: ${localPath}`);
 		} catch (err) {
 			console.error(`[FilenSync] Delete failed ${localPath}:`, err);
+		} finally {
+			// Always clean up — if remote delete failed, the next poll
+			// will pull the file back, which is the correct fallback.
+			this.recentlyDeleted.delete(localPath);
 		}
 	}
 
